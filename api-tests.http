@@ -1,0 +1,193 @@
+### Este archivo (.http) puede ser ejecutado directamente en IntelliJ IDEA o VS Code (con la extensión REST Client)
+### Permite simular los escenarios de prueba obligatorios para evaluar el parcial de marketing digital.
+
+@base_url = http://localhost:8080/api
+
+### =========================================================================
+### 1. PRUEBAS DE ANUNCIANTES (CRUD Y VALIDACIONES DE BAJA)
+### =========================================================================
+
+### 1.1 Crear Anunciante Regular Válido
+POST {{base_url}}/anunciantes
+Content-Type: application/json
+
+{
+  "nombreEmpresa": "Insumos Mar del Plata S.A.",
+  "cuit": "30-74859612-9",
+  "esCuentaVip": false
+}
+
+### 1.2 Crear Anunciante VIP Válido
+POST {{base_url}}/anunciantes
+Content-Type: application/json
+
+{
+  "nombreEmpresa": "Agencia Gamer Central",
+  "cuit": "30-11223344-5",
+  "esCuentaVip": true
+}
+
+### 1.3 Error de Validación: Nombre vacío y CUIT inválido
+POST {{base_url}}/anunciantes
+Content-Type: application/json
+
+{
+  "nombreEmpresa": "",
+  "cuit": "",
+  "esCuentaVip": false
+}
+### Esperado: 400 Bad Request con los mensajes de error correspondientes (JSR-303).
+
+### 1.4 Obtener todos los Anunciantes (con filtros opcionales)
+GET {{base_url}}/anunciantes?nombre=Insumos
+Content-Type: application/json
+
+
+### =========================================================================
+### 2. PRUEBAS DE ANUNCIOS Y OVERBUDGET DE CAMPAÑA
+### =========================================================================
+
+### 2.1 Cargar nuevo Anuncio válido en estado PENDIENTE
+### La Campaña ID 1 (CyberFest Gamers A) tiene un Presupuesto Base de 150.000,00.
+### Nota: El idAnunciante debe coincidir con uno creado previamente (ej: 1)
+POST {{base_url}}/anuncios
+Content-Type: application/json
+
+{
+  "idAnunciante": 1,
+  "idCampana": 1,
+  "inversionEstimada": 100000.00
+}
+### Esperado: 201 Created. Estado inicial: PENDIENTE, inversion_total = 0.00.
+
+### 2.2 Intentar cargar un anuncio en una Campaña VENCIDA (Campaña ID 4)
+POST {{base_url}}/anuncios
+Content-Type: application/json
+
+{
+  "idAnunciante": 1,
+  "idCampana": 4,
+  "inversionEstimada": 50000.00
+}
+### Esperado: 400 Bad Request o Custom Exception (La campaña ha alcanzado su fecha de finalización).
+
+### 2.3 Simular Overbudget Crítico de Campaña (+35% del presupuesto base)
+### El presupuesto base de la Campaña 1 es 150.000. El límite estricto es 202.500 (150k + 35%).
+### Como ya asignamos 100.000 en el punto 2.1, si intentamos meter este anuncio de 110.000,
+### la suma en cola pasaría a 210.000, superando el límite de Overbudget.
+POST {{base_url}}/anuncios
+Content-Type: application/json
+
+{
+  "idAnunciante": 2,
+  "idCampana": 1,
+  "inversionEstimada": 110000.00
+}
+### Esperado: 409 Conflict o 400 Bad Request (Custom Exception: Límite de Overbudget de la campaña superado).
+
+
+### =========================================================================
+### 3. FLUJO DE CARGA DE GASTOS Y LOGICA DE REDISTRIBUCIÓN (SACRIFICIO)
+### =========================================================================
+
+### Para probar la redistribución compleja, primero preparemos el terreno:
+### Creamos un Anuncio "Sacrificable" (Anunciante REGULAR (ID 1) en estado PENDIENTE en Campaña 1)
+POST {{base_url}}/anuncios
+Content-Type: application/json
+
+{
+  "idAnunciante": 1,
+  "idCampana": 1,
+  "inversionEstimada": 30000.00
+}
+### (Asumamos que este anuncio tomó el ID 2 en la base de datos).
+
+### 3.1 Cargar gastos por primera vez -> Pasa a EN_CURSO
+### Cargamos un gasto menor al Anuncio 1 (creado en el paso 2.1 con inversión estimada de 100.000).
+POST {{base_url}}/anuncios/1/gastos
+Content-Type: application/json
+
+{
+  "montoGasto": 40000.00
+}
+### Esperado: 200 OK. El estado del Anuncio 1 debe cambiar a 'EN_CURSO' e inversion_total = 40000.00.
+
+### 3.2 Forzar la Regla de Redistribución (Robo de presupuesto al Anuncio Sacrificable)
+### El Anuncio 1 tiene inversión estimada de 100.000. Su límite del +30% es 130.000.
+### Actualmente tiene 40.000 de inversión_total. Si le sumamos un gasto masivo de 95.000,
+### la inversión total ascendería a 135.000 (excediendo el límite de 130k).
+POST {{base_url}}/anuncios/1/gastos
+Content-Type: application/json
+
+{
+  "montoGasto": 95000.00
+}
+### Esperado: 200 OK. El sistema detecta el exceso, busca en la Campaña 1 un anuncio PENDIENTE de cuenta Regular
+### (encuentra al Anuncio ID 2), lo Cancela automáticamente y le transfiere sus 30.000 de inversión estimada al Anuncio 1.
+### Ahora la inversión estimada del Anuncio 1 sube a 130.000 (nuevo límite tolerado 169.000). El gasto se procesa con éxito.
+### Además, como 135.000 supera la inversión_estimada original (100k), el anuncio 1 pasa automáticamente a FINALIZADO.
+
+### 3.3 Carga de gastos fallida (Anuncio ya Finalizado o Cancelado)
+POST {{base_url}}/anuncios/1/gastos
+Content-Type: application/json
+
+{
+  "montoGasto": 5000.00
+}
+### Esperado: 400 Bad Request (No se pueden cargar gastos a un anuncio en estado FINALIZADO o CANCELADO).
+
+
+### =========================================================================
+### 4. CANCELACIONES Y POLÍTICAS DE REEMBOLSO MONETARIO
+### =========================================================================
+
+### Para probar reembolsos limpios, primero creamos anuncios de control en la Campaña 2:
+### Anuncio de Anunciante Regular (ID 1)
+POST {{base_url}}/anuncios
+Content-Type: application/json
+
+{
+  "idAnunciante": 1,
+  "idCampana": 2,
+  "inversionEstimada": 50000.00
+}
+
+### Anuncio de Anunciante VIP (ID 2)
+POST {{base_url}}/anuncios
+Content-Type: application/json
+
+{
+  "idAnunciante": 2,
+  "idCampana": 2,
+  "inversionEstimada": 50000.00
+}
+
+### 4.1 Cancelar Anuncio de Anunciante REGULAR (Penalización del 20%)
+### Suponiendo que el anuncio regular de la Campaña 2 tomó el ID 3:
+POST {{base_url}}/anuncios/3/cancelar
+Content-Type: application/json
+
+### Esperado: 200 OK. Retorna CancelacionDTO. Estado cambia a CANCELADO. Monto reembolsado: 40000.00 (80%).
+
+### 4.2 Cancelar Anuncio de Anunciante VIP (Reembolso del 100%)
+### Suponiendo que el anuncio VIP de la Campaña 2 tomó el ID 4:
+POST {{base_url}}/anuncios/4/cancelar
+Content-Type: application/json
+
+### Esperado: 200 OK. Retorna CancelacionDTO. Estado cambia a CANCELADO. Monto reembolsado: 50000.00 (100%).
+
+
+### =========================================================================
+### 5. AUDITORÍA Y FILTRADOS DE CONTROL
+### =========================================================================
+
+### 5.1 Obtener todos los anunciantes que pertenecen a la Campaña 1
+GET {{base_url}}/anunciantes/campana/1
+Content-Type: application/json
+### Esperado: 200 OK. Retorna la lista única de anunciantes con pautas en esa campaña.
+
+### 5.2 Intentar dar de baja un Anunciante con actividad latente
+### Si el Anunciante 1 tiene anuncios EN_CURSO o PENDIENTES, la operación debe rebotar:
+DELETE {{base_url}}/anunciantes/1
+Content-Type: application/json
+### Esperado: 400 Bad Request (No se puede dar de baja lógica si existen pautas activas).
